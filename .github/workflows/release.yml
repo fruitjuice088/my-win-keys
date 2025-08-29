@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    env:
+      RID: win-x64
+      PUBLISH_DIR: ${{ github.workspace }}\out\publish
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Publish (single-file, framework-dependent by default)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ env.PUBLISH_DIR }}" | Out-Null
+          $tag = '${{ github.ref_name }}'
+          $ver = $tag -replace '^v',''
+          dotnet publish -c Release -r ${{ env.RID }} --self-contained false `
+            /p:PublishSingleFile=true /p:DebugType=none /p:DebugSymbols=false `
+            /p:Version=$ver -o "${{ env.PUBLISH_DIR }}"
+
+      - name: List publish outputs
+        shell: pwsh
+        run: |
+          Get-ChildItem -File "${{ env.PUBLISH_DIR }}" | Select-Object FullName,Length | Format-Table -AutoSize
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: MyWinKeys ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            ${{ env.PUBLISH_DIR }}\MyWinKeys.exe
+            ${{ env.PUBLISH_DIR }}\appsettings.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
