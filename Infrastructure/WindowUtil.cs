@@ -16,10 +16,10 @@ internal static class WindowUtil
     }
 
     // Corners
-    public static void MoveCursorLeftTop() => MoveCursor(r => (r.Left + 1, r.Top + 1));
-    public static void MoveCursorRightTop() => MoveCursor(r => (r.Right - 1, r.Top + 1));
-    public static void MoveCursorLeftBottom() => MoveCursor(r => (r.Left + 1, r.Bottom - 1));
-    public static void MoveCursorRightBottom() => MoveCursor(r => (r.Right - 1, r.Bottom - 1));
+    public static void MoveCursorLeftTop() => MoveCursor(r => (r.Left + 2, r.Top + 2));
+    public static void MoveCursorRightTop() => MoveCursor(r => (r.Right - 2, r.Top + 2));
+    public static void MoveCursorLeftBottom() => MoveCursor(r => (r.Left + 2, r.Bottom - 2));
+    public static void MoveCursorRightBottom() => MoveCursor(r => (r.Right - 2, r.Bottom - 2));
 
     // Special positions
     public static void MoveCursorTitleCenter() => MoveCursor(r => ((r.Left + r.Right) / 2, r.Top + 15));
