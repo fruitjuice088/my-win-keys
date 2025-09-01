@@ -29,7 +29,7 @@ internal sealed class RemapEngine
         _comboKeys = [
             _cfg.VK_J, _cfg.VK_W, _cfg.VK_E, _cfg.VK_I, _cfg.VK_O,
             _cfg.VK_1, _cfg.VK_2, _cfg.VK_3, _cfg.VK_4,
-            _cfg.VK_A, _cfg.VK_Z, _cfg.VK_H, _cfg.VK_L,
+            _cfg.VK_A, _cfg.VK_S, _cfg.VK_Z, _cfg.VK_H, _cfg.VK_L,
             _cfg.VK_C, _cfg.VK_M, _cfg.VK_OEM_COMMA, _cfg.VK_OEM_PERIOD
         ];
     }
@@ -66,12 +66,24 @@ internal sealed class RemapEngine
             }
             if (vk == _cfg.VK_Muhenkan)
             {
-                if (isDown) { Logger.Info("Muhenkan->Backspace"); InputSender.Tap(_cfg.VK_Back); }
+                if (isDown)
+                {
+                    // Respect SandS (Space-as-Shift) when mapping
+                    EnsureSandSChordActive(vk);
+                    Logger.Info("Muhenkan->Backspace");
+                    InputSender.Tap(_cfg.VK_Back);
+                }
                 return true;
             }
             if (vk == _cfg.VK_Henkan)
             {
-                if (isDown) { Logger.Info("Henkan->Enter"); InputSender.Tap(_cfg.VK_Return); }
+                if (isDown)
+                {
+                    // Respect SandS (Space-as-Shift) when mapping
+                    EnsureSandSChordActive(vk);
+                    Logger.Info("Henkan->Enter");
+                    InputSender.Tap(_cfg.VK_Return);
+                }
                 return true;
             }
 
@@ -275,6 +287,22 @@ internal sealed class RemapEngine
         }
     }
 
+    // If Space-based SandS chord should be active for a non-space key, ensure Shift is held before emitting mapped output
+    private void EnsureSandSChordActive(int otherVk)
+    {
+        if (otherVk == _cfg.VK_Space) return;
+        if (_states.TryGetValue(_cfg.VK_Space, out var space) && space.Down && !space.SentHold)
+        {
+            if (!space.HoldActive)
+            {
+                Logger.Info("SandS: hold Shift (chord) [via mapping]");
+                InputSender.KeyDown(_cfg.VK_Shift);
+                space.HoldActive = true;
+            }
+            _pendingCombos.Remove(_cfg.VK_Space);
+        }
+    }
+
     private void TrimRecent(DateTime now)
     {
         while (_recentDowns.Count > 0 && (now - _recentDowns.Peek().at).TotalMilliseconds > _cfg.HoldThresholdMs)
@@ -390,6 +418,16 @@ internal sealed class RemapEngine
             ConsumeKey(_cfg.VK_D); ConsumeKey(_cfg.VK_C);
             InputSender.Tap(_cfg.VK_Muhenkan);
             Logger.Info("Combo dc -> Muhenkan");
+            return true;
+        }
+
+        // sd -> Delete (unordered)
+        bool sRecent = arr.Any(a => Within(a, _cfg.VK_S));
+        if (sRecent && dRecent)
+        {
+            ConsumeKey(_cfg.VK_S); ConsumeKey(_cfg.VK_D);
+            InputSender.Tap(_cfg.VK_Delete);
+            Logger.Info("Combo sd -> Delete");
             return true;
         }
 

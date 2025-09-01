@@ -47,12 +47,14 @@ public sealed class AppConfig
     public int VK_3 { get; set; } = 0x33;
     public int VK_4 { get; set; } = 0x34;
     public int VK_A { get; set; } = 0x41;
+    public int VK_S { get; set; } = 0x53;
     public int VK_Z { get; set; } = 0x5A;
 
     public int VK_C { get; set; } = 0x43;
     public int VK_M { get; set; } = 0x4D;
     public int VK_OEM_COMMA { get; set; } = 0xBC;
     public int VK_OEM_PERIOD { get; set; } = 0xBE;
+    public int VK_Delete { get; set; } = 0x2E;
 
     public static AppConfig Load(string path)
     {
