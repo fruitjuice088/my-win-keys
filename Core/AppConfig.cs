@@ -10,6 +10,8 @@ public sealed class AppConfig
     public int HoldThresholdMs { get; set; } = 175;
     public int TapGraceMs { get; set; } = 130;
     public int ComboWindowMs { get; set; } = 50;
+    // double-tap window for enabling repeat passthrough on tap-hold keys (e.g., k,k(hold) -> kkkkk...)
+    public int DoubleTapRepeatWindowMs { get; set; } = 250;
 
     // key codes (virtual-key codes)
     public int VK_Space { get; set; } = 0x20;

@@ -15,6 +15,8 @@ internal sealed class RemapEngine
         public bool SentHold; // decision made (tap or hold)
         public bool HoldActive; // modifier is currently pressed down
         public bool OutputEmitted; // e.g., Space tap already sent in Space+Other mode
+        public DateTime LastTapAt; // last time a tap output was emitted for this key
+        public bool RepeatPassthrough; // when true, do not suppress OS repeat for this key (double-tap then hold)
     }
 
     private readonly Dictionary<int, KeyState> _states = [];
@@ -41,20 +43,25 @@ internal sealed class RemapEngine
             var now = DateTime.UtcNow;
 
             var isTabHeld = _states.TryGetValue(_cfg.VK_Tab, out var tabSt) && tabSt.Down;
-            var swallowRepeat = false;
-            if (vk == _cfg.VK_K || vk == _cfg.VK_D) // For D/K, only swallow if Tab is not held
+            // Swallow repeated downs for special keys unless in repeat passthrough
+            if (isDown && _states.TryGetValue(vk, out var stRpt) && stRpt.Down)
             {
-                if (!isTabHeld) swallowRepeat = true;
-            }
-            else if (vk == _cfg.VK_Space || vk == _cfg.VK_Tab)
-            {
-                swallowRepeat = true;
-            }
-
-            // For repeats on Space/D/K/Tab we skip processing entirely; avoid logging spam as well
-            if (isDown && _states.TryGetValue(vk, out var stRpt) && stRpt.Down && swallowRepeat)
-            {
-                return true; // swallow repeats
+                // Space/Tab: always swallow repeats
+                if (vk == _cfg.VK_Space || vk == _cfg.VK_Tab)
+                    return true;
+                // D/K: swallow unless Tab-layer is held or repeat passthrough is active
+                if ((vk == _cfg.VK_D || vk == _cfg.VK_K))
+                {
+                    if (!isTabHeld && !stRpt.RepeatPassthrough)
+                        return true;
+                }
+                // Combo letters (e.g., H/J/K/L): swallow unless repeat passthrough
+                else if (_comboKeys.Contains(vk))
+                {
+                    bool hjkl = (vk == _cfg.VK_H || vk == _cfg.VK_J || vk == _cfg.VK_K || vk == _cfg.VK_L);
+                    if (!(hjkl && stRpt.RepeatPassthrough))
+                        return true;
+                }
             }
             Logger.Info($"Key {(isDown ? "Down" : "Up")} VK=0x{vk:X}");
 
@@ -116,23 +123,57 @@ internal sealed class RemapEngine
                 if (_comboKeys.Contains(vk))
                 {
                     // Other key down may affect tap-hold interactions (Space/D/K/Tab)
-                    if (!HandleTapHoldInteraction(vk, now))
+                    var interacted = HandleTapHoldInteraction(vk, now);
+                    if (!interacted)
                     {
+                        // Double-tap then hold repeat passthrough for H/J/K/L
+                        bool isHJKL = vk == _cfg.VK_H || vk == _cfg.VK_J || vk == _cfg.VK_K || vk == _cfg.VK_L;
+                        if (isHJKL)
+                        {
+                            var sinceTap = (int)(now - st.LastTapAt).TotalMilliseconds;
+                            if (st.LastTapAt != default && sinceTap >= 0 && sinceTap <= _cfg.DoubleTapRepeatWindowMs)
+                            {
+                                st.RepeatPassthrough = true;
+                                Logger.Info($"{(char)vk} double-tap: enable repeat passthrough");
+                                return false; // allow down + repeats to flow
+                            }
+                            if (st.RepeatPassthrough)
+                            {
+                                return false; // already in passthrough; let event propagate
+                            }
+                        }
+
                         _pendingCombos[vk] = now;
                     }
-                    // Do not emit immediately
-                    return true;
+                    // Do not emit immediately when buffering
+                    return interacted || true;
                 }
 
                 // For tap-hold keys: Space, D, K, Tab
                 if (vk == _cfg.VK_Space || vk == _cfg.VK_D || vk == _cfg.VK_K || vk == _cfg.VK_Tab)
                 {
+                    // Double-tap then hold -> enable repeat passthrough for D/K letters
+                    if ((vk == _cfg.VK_D || vk == _cfg.VK_K))
+                    {
+                        var sinceTap = (int)(now - st.LastTapAt).TotalMilliseconds;
+                        if (st.LastTapAt != default && sinceTap >= 0 && sinceTap <= _cfg.DoubleTapRepeatWindowMs)
+                        {
+                            // Enter repeat passthrough mode: don't treat as Ctrl-hold; allow OS repeat of the letter
+                            st.RepeatPassthrough = true;
+                            Logger.Info($"{(vk == _cfg.VK_D ? "D" : "K")} double-tap: enable repeat passthrough");
+                        }
+                    }
                     // Apply interactions only for D/K to let SandS kick in; do NOT trigger on Space/Tab itself
                     if (vk == _cfg.VK_D || vk == _cfg.VK_K)
                         HandleTapHoldInteraction(vk, now);
                     // Defer decision until up or other activity
                     Logger.Info("TapHold key down buffered");
-                    return true; // suppress original event for these keys until resolved
+                    // If repeat passthrough is active for D/K, let the OS handle; otherwise suppress
+                    if (st.RepeatPassthrough && (vk == _cfg.VK_D || vk == _cfg.VK_K))
+                    {
+                        return false; // allow down (and subsequent repeats) to flow
+                    }
+                    return true; // suppress for others
                 }
 
                 // Other key down may affect tap-hold interactions
@@ -142,13 +183,22 @@ internal sealed class RemapEngine
             }
             else // key up
             {
+                // For H/J/L repeat passthrough: let native up flow and mark last tap time
+                if ((vk == _cfg.VK_H || vk == _cfg.VK_J || vk == _cfg.VK_L) && st.RepeatPassthrough)
+                {
+                    st.RepeatPassthrough = false;
+                    st.SentHold = true;
+                    st.Down = false;
+                    st.LastTapAt = now;
+                    return false; // allow OS key up
+                }
                 // If this key was buffered as a combo candidate and no combo consumed it, emit now to avoid lag
                 if (_comboKeys.Contains(vk) && _pendingCombos.ContainsKey(vk))
                 {
                     Logger.Info($"Combo candidate key up -> immediate tap VK=0x{vk:X}");
                     InputSender.Tap(vk);
                     _pendingCombos.Remove(vk);
-                    if (_states.TryGetValue(vk, out var st0)) { st0.SentHold = true; st0.Down = false; }
+                    if (_states.TryGetValue(vk, out var st0)) { st0.SentHold = true; st0.Down = false; st0.LastTapAt = now; }
                     return true;
                 }
 
@@ -233,6 +283,15 @@ internal sealed class RemapEngine
 
                 if (vk == _cfg.VK_D)
                 {
+                    // If repeat passthrough was active, do not synthesize anything; let natural up through
+                    if (st.RepeatPassthrough)
+                    {
+                        st.RepeatPassthrough = false;
+                        st.SentHold = true;
+                        st.Down = false;
+                        st.LastTapAt = now; // consider the sequence as a tap for potential next double-tap
+                        return false; // pass through up so OS key state stays correct
+                    }
                     if (st.SentHold)
                     {
                         // Decision already made earlier by interaction; only release if a Ctrl hold was active
@@ -250,7 +309,7 @@ internal sealed class RemapEngine
                     }
                     else
                     {
-                        Logger.Info("D tap"); InputSender.Tap(_cfg.VK_D);
+                        Logger.Info("D tap"); InputSender.Tap(_cfg.VK_D); st.LastTapAt = now;
                     }
                     st.SentHold = true;
                     return true;
@@ -258,6 +317,15 @@ internal sealed class RemapEngine
 
                 if (vk == _cfg.VK_K)
                 {
+                    // If repeat passthrough was active, do not synthesize anything; let natural up through
+                    if (st.RepeatPassthrough)
+                    {
+                        st.RepeatPassthrough = false;
+                        st.SentHold = true;
+                        st.Down = false;
+                        st.LastTapAt = now; // consider the sequence as a tap for potential next double-tap
+                        return false; // pass through up so OS key state stays correct
+                    }
                     if (st.SentHold)
                     {
                         // Decision already made earlier by interaction; only release if a Ctrl hold was active
@@ -275,7 +343,7 @@ internal sealed class RemapEngine
                     }
                     else
                     {
-                        Logger.Info("K tap"); InputSender.Tap(_cfg.VK_K);
+                        Logger.Info("K tap"); InputSender.Tap(_cfg.VK_K); st.LastTapAt = now;
                     }
                     st.SentHold = true;
                     return true;
@@ -421,8 +489,8 @@ internal sealed class RemapEngine
             return true;
         }
 
-        // sd -> Delete (unordered)
-        bool sRecent = arr.Any(a => Within(a, _cfg.VK_S));
+    // sd -> Delete (unordered)
+    bool sRecent = arr.Any(a => Within(a, _cfg.VK_S));
         if (sRecent && dRecent)
         {
             ConsumeKey(_cfg.VK_S); ConsumeKey(_cfg.VK_D);
@@ -461,6 +529,57 @@ internal sealed class RemapEngine
             InputSender.TypeText("exit"); return true;
         }
 
+        // Generic pair-ordering stabilization (principled):
+        // If two key downs occur within ComboWindowMs AND at least one of them is in a buffered/undecided state
+        //   (either present in _pendingCombos OR a tap-hold key currently Down && !SentHold),
+        // then consume both and emit taps in actual down order.
+        // This avoids needing to list all possible keys in _comboKeys while preventing order inversion
+        // caused by one key being delayed by special processing.
+        var latestEvt = latest;
+        bool IsBufferedOrUndecided(int vkx)
+        {
+            if (_pendingCombos.ContainsKey(vkx)) return true;
+            if (_states.TryGetValue(vkx, out var stx))
+            {
+                // tap-hold candidates: Space, D, K, Tab
+                if ((vkx == _cfg.VK_Space || vkx == _cfg.VK_D || vkx == _cfg.VK_K || vkx == _cfg.VK_Tab) && stx.Down && !stx.SentHold)
+                    return true;
+            }
+            return false;
+        }
+
+        // Find a prior different key within the window
+        var prior = arr.Skip(1).FirstOrDefault(a => a.vk != latestEvt.vk && (now - a.at).TotalMilliseconds <= _cfg.ComboWindowMs);
+        if (prior.vk != 0 && (IsBufferedOrUndecided(prior.vk) || IsBufferedOrUndecided(latestEvt.vk)))
+        {
+            // Respect repeat-passthrough: don't touch pairs if either key is in passthrough
+            if (_states.TryGetValue(prior.vk, out var pst) && pst.RepeatPassthrough) { return false; }
+            if (_states.TryGetValue(latestEvt.vk, out var lst) && lst.RepeatPassthrough) { return false; }
+
+            var first = prior.at <= latestEvt.at ? prior : latestEvt;
+            var second = prior.at <= latestEvt.at ? latestEvt : prior;
+
+            // Decide injections BEFORE consuming/removing to preserve state checks
+            bool firstWasBuffered = IsBufferedOrUndecided(first.vk);   // prior key was already suppressed by us?
+            bool secondIsCurrent = second.vk == latestEvt.vk;          // latest will be suppressed by returning true
+
+            // Inject in actual order: emit first only if it was buffered; always emit second (current) as we suppress it
+            if (firstWasBuffered)
+            {
+                InputSender.Tap(first.vk);
+            }
+            if (secondIsCurrent && (secondIsCurrent || IsBufferedOrUndecided(second.vk)))
+            {
+                InputSender.Tap(second.vk);
+            }
+
+            // Now consume and clear pending so no further actions occur for these keys
+            ConsumeKey(first.vk); ConsumeKey(second.vk);
+            _pendingCombos.Remove(first.vk); _pendingCombos.Remove(second.vk);
+            Logger.Info($"Pair-order stabilize[buffered]: {(char)first.vk}+{(char)second.vk}");
+            return true;
+        }
+
         return false;
     }
 
@@ -492,6 +611,8 @@ internal sealed class RemapEngine
                 // Consume the key first to prevent re-entrancy issues from unmarked SendInput
                 if (_states.TryGetValue(otherVk, out var st))
                 {
+                    // Arrow layer takes priority over any letter-repeat passthrough
+                    st.RepeatPassthrough = false;
                     st.SentHold = true;
                 }
                 _pendingCombos.Remove(otherVk);
@@ -539,6 +660,12 @@ internal sealed class RemapEngine
                 if (elapsed < _cfg.TapGraceMs)
                 {
                     // Very quick sequence with another key: resolve D/K as tap, unless Space chord is active
+                    if (st.RepeatPassthrough)
+                    {
+                        // In repeat passthrough, don't synthesize extra taps
+                        _pendingCombos.Remove(key);
+                        continue;
+                    }
                     if (_states.TryGetValue(_cfg.VK_Space, out var sp) && sp.Down)
                     {
                         // Under SandS, don't emit D/K; let Shift chord take effect only
@@ -550,14 +677,18 @@ internal sealed class RemapEngine
                     {
                         if (key == _cfg.VK_D) { Logger.Info("D quick -> tap"); InputSender.Tap(_cfg.VK_D); }
                         if (key == _cfg.VK_K) { Logger.Info("K quick -> tap"); InputSender.Tap(_cfg.VK_K); }
+                        st.LastTapAt = now;
                         st.SentHold = true;
                         // keep st.Down=true to suppress repeats; physical up will be suppressed by SentHold check
                     }
                 }
                 else if (!st.HoldActive)
                 {
-                    if (key == _cfg.VK_D) { Logger.Info("D: chord -> hold LCtrl"); InputSender.KeyDown(_cfg.VK_LControl); }
-                    if (key == _cfg.VK_K) { Logger.Info("K: chord -> hold RCtrl"); InputSender.KeyDown(_cfg.VK_RControl); }
+                    if (!st.RepeatPassthrough)
+                    {
+                        if (key == _cfg.VK_D) { Logger.Info("D: chord -> hold LCtrl"); InputSender.KeyDown(_cfg.VK_LControl); }
+                        if (key == _cfg.VK_K) { Logger.Info("K: chord -> hold RCtrl"); InputSender.KeyDown(_cfg.VK_RControl); }
+                    }
                     st.HoldActive = true; st.SentHold = true;
                 }
                 _pendingCombos.Remove(key);
@@ -584,7 +715,12 @@ internal sealed class RemapEngine
                 if (_states.TryGetValue(vk, out var st))
                 {
                     st.SentHold = true;
-                    st.Down = false;
+                    // Keep Down=true for non tap-hold keys to ensure subsequent auto-repeat downs are recognized and swallowed
+                    if (vk == _cfg.VK_Space || vk == _cfg.VK_Tab || vk == _cfg.VK_D || vk == _cfg.VK_K)
+                    {
+                        st.Down = false;
+                    }
+                    if (vk == _cfg.VK_D || vk == _cfg.VK_K || vk == _cfg.VK_H || vk == _cfg.VK_J || vk == _cfg.VK_L) st.LastTapAt = now;
                 }
             }
         }
